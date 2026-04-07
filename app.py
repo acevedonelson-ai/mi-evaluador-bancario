@@ -1,18 +1,12 @@
 import streamlit as st
 import requests
+import pdfplumber
 import pandas as pd
 from fpdf import FPDF
-from datetime import datetime
+import re
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Analista Riesgo Hipotecario", layout="wide")
-
-st.markdown("""
-    <style>
-    .uf-card { background-color: #1E3A8A; color: white; padding: 20px; border-radius: 10px; text-align: center; }
-    .stMetric { border: 1px solid #ddd; padding: 10px; border-radius: 8px; }
-    </style>
-    """, unsafe_allow_html=True)
+st.set_page_config(page_title="Broker AI - Analista F22", layout="wide")
 
 @st.cache_data(ttl=3600)
 def get_uf():
@@ -21,154 +15,114 @@ def get_uf():
 
 uf_hoy = get_uf()
 
-# --- FUNCIONES DE CÁLCULO ---
-def calcular_promedio_castigado(lista_montos, castigo=0.3):
-    # Filtra valores mayores a 0
-    validos = [m for m in lista_montos if m > 0]
-    if len(validos) < 3: return 0
-    promedio = sum(validos) / len(validos)
-    return promedio * (1 - castigo)
+# --- MOTOR DE ANÁLISIS F22 ---
+def analizar_f22(file):
+    texto_completo = ""
+    datos_extraidos = {"sueldos": 0, "honorarios": 0, "rut": "", "nombre": ""}
+    
+    with pdfplumber.open(file) as pdf:
+        for pagina in pdf.pages:
+            texto_completo += pagina.extract_text()
+            
+    # Buscamos códigos específicos del F22
+    # Código 1098: Sueldos 
+    match_sueldos = re.search(r"1098\s+([\d.]+)", texto_completo)
+    if match_sueldos:
+        datos_extraidos["sueldos"] = float(match_sueldos.group(1).replace(".", ""))
+        
+    # Código 110: Honorarios 
+    match_honor = re.search(r"110\s+([\d.]+)", texto_completo)
+    if match_honor:
+        datos_extraidos["honorarios"] = float(match_honor.group(1).replace(".", ""))
+        
+    # Identificación básica 
+    match_rut = re.search(r"(\d{1,2}\.\d{3}\.\d{3}-[\dkK]|\d{7,8}-[\dkK])", texto_completo)
+    if match_rut: datos_extraidos["rut"] = match_rut.group(1)
+    
+    return datos_extraidos
 
-# --- SIDEBAR ---
+# --- INTERFAZ ---
+st.markdown(f'<div style="background-color:#1E3A8A;color:white;padding:15px;border-radius:10px;text-align:center">UF HOY: ${uf_hoy:,.2f}</div>', unsafe_allow_html=True)
+st.title("🛡️ Sistema de Evaluación Hipotecaria")
+
+# SECCIÓN DE CARGA DE DOCUMENTOS
 with st.sidebar:
-    st.markdown(f'<div class="uf-card"><h3>UF ACTUAL</h3><h2>${uf_hoy:,.2f}</h2></div>', unsafe_allow_html=True)
-    st.header("👤 Datos del Titular")
-    nombre = st.text_input("Nombre Completo")
-    rut = st.text_input("RUT")
-
-# --- CUERPO PRINCIPAL ---
-st.title("🛡️ Sistema de Evaluación de Riesgo Bancario")
-
-def seccion_ingresos(label):
-    st.header(f"💼 Perfil Ingresos: {label}")
+    st.header("📂 Análisis de Documentos")
+    f22_file = st.file_uploader("Subir Formulario 22 (F22)", type="pdf")
     
-    # 1. Definir Naturaleza de la Renta
-    c1, c2 = st.columns(2)
-    es_dep = c1.checkbox(f"{label} es Dependiente", value=True, key=f"dep_{label}")
-    es_ind = c2.checkbox(f"{label} es Independiente", key=f"ind_{label}")
+    analisis = None
+    if f22_file:
+        with st.spinner("Analizando F22..."):
+            analisis = analizar_f22(f22_file)
+            st.success("Análisis Completado")
+            st.write(f"**RUT:** {analisis['rut']}")
+
+# --- LÓGICA DE RENTA ---
+st.header("💼 Perfil de Ingresos")
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("Ingresos como Dependiente")
+    # Si el análisis detectó sueldos (Código 1098), los pone automáticamente 
+    sueldo_base_anual = analisis['sueldos'] if analisis else 0
+    sueldo_mensual = st.number_input("Sueldo Mensual (Fijo)", value=int(sueldo_base_anual/12) if sueldo_base_anual > 0 else 0)
     
-    renta_final = 0
-    
-    # SECCIÓN DEPENDIENTE
-    if es_dep:
-        with st.expander(f"Detalle Liquidaciones - {label}", expanded=True):
-            col_f, col_v, col_n = st.columns(3)
-            with col_f:
-                st.subheader("Fijos")
-                base = st.number_input(f"Sueldo Base ($)", min_value=0, key=f"base_{label}")
-                grat = st.number_input(f"Gratificación ($)", min_value=0, key=f"grat_{label}")
-            with col_v:
-                st.subheader("Variables (Castigo 30%)")
-                st.caption("Ingrese al menos 3 meses")
-                v1 = st.number_input("Mes 1", min_value=0, key=f"v1_{label}")
-                v2 = st.number_input("Mes 2", min_value=0, key=f"v2_{label}")
-                v3 = st.number_input("Mes 3", min_value=0, key=f"v3_{label}")
-                v_prom = calcular_promedio_castigado([v1, v2, v3])
-            with col_n:
-                st.subheader("No Imponibles")
-                colac = st.number_input(f"Colación ($)", min_value=0, key=f"col_{label}")
-                movil = st.number_input(f"Movilización ($)", min_value=0, key=f"mov_{label}")
-            
-            renta_final += (base + grat + colac + movil + v_prom)
+    # Variables con promedio de 3 meses (Castigo 30%)
+    st.caption("Variables (Castigo 30%)")
+    v_cols = st.columns(3)
+    vm1 = v_cols[0].number_input("Mes 1", value=0, key="v1")
+    vm2 = v_cols[1].number_input("Mes 2", value=0, key="v2")
+    vm3 = v_cols[2].number_input("Mes 3", value=0, key="v3")
+    validos = [v for v in [vm1, vm2, vm3] if v > 0]
+    prom_var = (sum(validos)/len(validos) * 0.7) if len(validos) >= 3 else 0
 
-    # SECCIÓN INDEPENDIENTE
-    if es_ind:
-        with st.expander(f"Detalle Tributario (DAI) - {label}", expanded=True):
-            st.info("Cargue PDF de Declaración de Impuestos para análisis")
-            archivo = st.file_uploader("Subir DAI", type="pdf", key=f"pdf_{label}")
-            # Simulamos lectura de DAI (Castigo 30% estándar bancario)
-            monto_dai = st.number_input("Renta Líquida Anual Declarada ($)", min_value=0, key=f"dai_m_{label}")
-            renta_final += (monto_dai / 12) * 0.7
+with col2:
+    st.subheader("Ingresos Independientes / Boletas")
+    # Si detectó honorarios (Código 110) 
+    honor_anual = analisis['honorarios'] if analisis else 0
+    honor_mensual = st.number_input("Honorarios Brutos Mensuales", value=int(honor_anual/12) if honor_anual > 0 else 0)
+    renta_indep = honor_mensual * 0.7 # Castigo 30% automático
 
-    # SECCIÓN OPCIONAL: BOLETAS Y ARRIENDOS
-    with st.expander(f"Ingresos Adicionales (Boletas/Arriendos) - {label}"):
-        tiene_bol = st.checkbox("¿Tiene Boletas de Honorarios?", key=f"has_bol_{label}")
-        if tiene_bol:
-            st.caption("Promedio 6 meses (Castigo 30%)")
-            b_cols = st.columns(3)
-            bols = [b_cols[i%3].number_input(f"Mes {i+1}", min_value=0, key=f"bol_{i}_{label}") for i in range(6)]
-            renta_final += calcular_promedio_castigado(bols)
-            
-        tiene_arr = st.checkbox("¿Tiene Ingresos por Arriendo?", key=f"has_arr_{label}")
-        if tiene_arr:
-            arr_monto = st.number_input("Monto mensual Arriendo ($)", min_value=0, key=f"arr_val_{label}")
-            renta_final += (arr_monto * 0.8) # 20% vacancia
-
-    return renta_final
-
-# Ejecutar secciones
-r1 = seccion_ingresos("Titular")
-r2 = 0
-if st.checkbox("👥 Agregar Codeudor"):
-    r2 = seccion_ingresos("Codeudor")
-
-renta_total = r1 + r2
+renta_total_depurada = sueldo_mensual + prom_var + renta_indep
 
 # --- ANÁLISIS DE DEUDA CMF ---
 st.divider()
-st.header("💳 Análisis de Deuda CMF (Consolidado)")
-with st.container(border=True):
-    d1, d2, d3 = st.columns(3)
-    
-    # Consumo
-    m_cons = d1.number_input("Deuda Total Consumo ($)", min_value=0)
-    c_cons_sug = m_cons * 0.05
-    c_cons = d1.number_input("Cuota Mensual Consumo Real ($)", value=int(c_cons_sug))
-    
-    # Tarjetas
-    m_tc = d2.number_input("Cupo Utilizado TC ($)", min_value=0)
-    c_tc_sug = m_tc * 0.05
-    c_tc = d2.number_input("Pago Mensual TC Real ($)", value=int(c_tc_sug))
-    
-    # Hipotecario
-    m_hipo = d3.number_input("Deuda Total Hipotecaria ($)", min_value=0)
-    c_hipo_sug = m_hipo * 0.015
-    c_hipo = d3.number_input("Dividendo Mensual Real ($)", value=int(c_hipo_sug))
+st.header("💳 Deuda CMF")
+d_col1, d_col2, d_col3 = st.columns(3)
 
-total_cuotas_previas = c_cons + c_tc + c_hipo
+with d_col1:
+    m_cons = st.number_input("Monto Deuda Consumo ($)", value=0)
+    c_cons = st.number_input("Cuota Real Consumo", value=int(m_cons * 0.05))
 
-# --- SIMULACIÓN NUEVO CRÉDITO ---
+with d_col2:
+    m_tc = st.number_input("Monto Deuda TC ($)", value=0)
+    c_tc = st.number_input("Pago Mensual TC", value=int(m_tc * 0.05))
+
+with d_col3:
+    m_hip = st.number_input("Monto Deuda Hipotecaria ($)", value=0)
+    c_hip = st.number_input("Dividendo Real", value=int(m_hip * 0.015))
+
+total_deuda = c_cons + c_tc + c_hip
+
+# --- SIMULACIÓN Y RESULTADOS ---
 st.divider()
-st.header("🏠 Simulación Nuevo Crédito")
-s1, s2, s3 = st.columns(3)
-v_prop_uf = s1.number_input("Valor Propiedad (UF)", value=3500)
-m_cred_uf = s2.number_input("Crédito Solicitado (UF)", value=2800)
-plazo = s3.slider("Plazo en Años", 5, 30, 20)
+s1, s2 = st.columns(2)
+m_prop = s1.number_input("Valor Propiedad (UF)", value=3000)
+m_cred = s2.number_input("Crédito Solicitado (UF)", value=2400)
 
-# Cálculo Matemático Financiero
-tasa_anual = 0.05
-tasa_mensual = tasa_anual / 12
-n = plazo * 12
-div_uf = m_cred_uf * (tasa_mensual * (1 + tasa_mensual)**n) / ((1 + tasa_mensual)**n - 1)
-div_clp = (div_uf * uf_hoy) * 1.15 # Seguros
+div_uf = (m_cred * 0.005) # Estimación rápida tasa + seguros
+div_clp = div_uf * uf_hoy
 
-# --- RESUMEN DE CARGAS ---
-st.divider()
-rci = (div_clp / renta_total * 100) if renta_total > 0 else 0
-cft = ((div_clp + total_cuotas_previas) / renta_total * 100) if renta_total > 0 else 0
+rci = (div_clp / renta_total_depurada * 100) if renta_total_depurada > 0 else 0
+cft = ((div_clp + total_deuda) / renta_total_depurada * 100) if renta_total_depurada > 0 else 0
 
-st.header("📊 Resultado Evaluación Financiera")
-res1, res2, res3 = st.columns(3)
-res1.metric("Renta Líquida Depurada", f"${renta_total:,.0f}")
-res2.metric("Carga Hipotecaria (RCI)", f"{rci:.1f}%")
-res3.metric("Carga Financiera Total (CFT)", f"{cft:.1f}%")
+st.header("📋 Resumen Final")
+r_col1, r_col2, r_col3 = st.columns(3)
+r_col1.metric("Renta Depurada", f"${renta_total_depurada:,.0f}")
+r_col2.metric("Carga Hipotecaria (RCI)", f"{rci:.1f}%")
+r_col3.metric("Carga Total (CFT)", f"{cft:.1f}%")
 
-# RECOMENDACIONES BANCARIAS
-with st.expander("📝 Ver Recomendaciones y Análisis"):
-    st.write(f"**Análisis para {nombre}:**")
-    if rci > 25:
-        st.error(f"⚠️ RCI Alto ({rci:.1f}%): Supera el 25% recomendado. El dividendo es muy alto para esta renta.")
-    if cft > 45:
-        st.error(f"⚠️ Sobreendeudamiento ({cft:.1f}%): La carga financiera total supera el 45%.")
-    
-    if rci <= 25 and cft <= 40:
-        st.success("✅ Califica en: Bancos Tradicionales (Chile, Santander, BCI, Scotiabank).")
-    elif cft <= 50:
-        st.warning("✅ Califica en: Banco Estado o Mutuales (más flexibles con la carga total).")
-    else:
-        st.error("❌ No califica actualmente. Se recomienda prepagar deuda de consumo antes de postular.")
-
-# --- PDF ---
-if st.button("📄 Descargar Resumen en PDF"):
-    st.info("Generando archivo...")
-    # (Aquí iría la lógica simplificada del PDF con FPDF)
+if rci <= 25 and cft <= 45:
+    st.success("✅ CALIFICA: Perfil óptimo para Bancos Tradicionales.")
+else:
+    st.error("❌ NO CALIFICA: Excede los límites de carga financiera.")
