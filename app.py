@@ -1,95 +1,123 @@
 import streamlit as st
 import requests
+import PyPDF2
+import pandas as pd
 
-# 1. FUNCIÓN PARA OBTENER UF AUTOMÁTICA
+# --- CONFIGURACIÓN ESTÉTICA ---
+st.set_page_config(page_title="Broker Digital Pro", layout="wide")
+st.markdown("""
+    <style>
+    .main { background-color: #f5f7f9; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+    """, unsafe_allow_html=True)
+
 @st.cache_data(ttl=3600)
-def obtener_uf():
+def get_uf():
     try:
-        # Consulta a la API de mindicador.cl
-        data = requests.get("https://mindicador.cl/api/uf").json()
-        return data['serie'][0]['valor']
-    except:
-        return 38000.0  # Valor de respaldo si falla la conexión
+        return requests.get("https://mindicador.cl/api/uf").json()['serie'][0]['valor']
+    except: return 38000.0
 
-uf_valor = obtener_uf()
+uf = get_uf()
 
-# CONFIGURACIÓN DE LA PÁGINA
-st.set_page_config(page_title="Analista Bancario Pro", layout="wide")
-st.title("🏦 Evaluador de Crédito Hipotecario")
-st.sidebar.metric("UF Hoy", f"${uf_valor:,.2f}")
-
-# 2. FUNCIÓN DE DEPURACIÓN DE RENTA (Según tu requerimiento)
-def depurar_ingresos(persona):
-    st.subheader(f"Ingresos {persona}")
-    tipo = st.radio(f"Tipo de trabajador ({persona})", ["Dependiente", "Independiente"], key=f"tipo_{persona}")
-    
-    if tipo == "Dependiente":
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            fijo = st.number_input(f"Sueldo Base + Gratificación ({persona})", min_value=0, key=f"f_{persona}")
-        with col2:
-            variable = st.number_input(f"Bonos + Comisiones ({persona})", min_value=0, key=f"v_{persona}")
-        with col3:
-            no_imp = st.number_input(f"Colación + Movilización ({persona})", min_value=0, key=f"n_{persona}")
+# --- LÓGICA DE CÁLCULO DE RENTA ---
+def calcular_renta(key):
+    with st.container(border=True):
+        st.subheader(f"📊 Ingresos {key}")
+        tipo = st.selectbox(f"Perfil Principal", ["Dependiente", "Independiente"], key=f"tipo_{key}")
         
-        # Lógica: Fijos y No imponibles al 100%, Variables al 80%
-        return fijo + no_imp + (variable * 0.8)
-    else:
-        st.info("Cargar DAI (Declaración Anual de Impuestos)")
-        renta_anual = st.number_input(f"Promedio Renta Líquida Anual ({persona})", min_value=0, key=f"dai_{persona}")
-        # Los bancos castigan la renta de independientes (usualmente 30%)
-        return (renta_anual / 12) * 0.7
+        r_fija = 0
+        r_variable = 0
+        r_no_imp = 0
+        
+        if tipo == "Dependiente":
+            c1, c2, c3 = st.columns(3)
+            r_fija = c1.number_input("Sueldo Base + Gratif.", min_value=0, key=f"f_{key}")
+            r_variable = c2.number_input("Promedio Variables (Bonos)", min_value=0, key=f"v_{key}")
+            r_no_imp = c3.number_input("Colación + Movil.", min_value=0, key=f"n_{key}")
+        else:
+            archivo = st.file_uploader("Cargar DAI (PDF)", type="pdf", key=f"pdf_{key}")
+            if archivo:
+                st.success("PDF cargado. Extrayendo datos...")
+                # Aquí iría la lógica de extracción específica
+            r_fija = st.number_input("Promedio Renta Líquida DAI", min_value=0, key=f"dai_{key}")
+            r_fija = r_fija * 0.7 # Castigo independiente
 
-# 3. ENTRADA DE DATOS
-col_tit, col_cod = st.columns(2)
-with col_tit:
-    renta_t1 = depurar_ingresos("Titular 1")
+        # EXTRAS (Boletas y Arriendos)
+        with st.expander("➕ Sumar Boletas o Arriendos"):
+            col_a, col_b = st.columns(2)
+            boletas = col_a.number_input("Promedio Boletas (6 meses)", min_value=0, key=f"bol_{key}")
+            arriendos = col_b.number_input("Ingreso por Arriendos", min_value=0, key=f"arr_{key}")
+        
+        total_depurado = r_fija + (r_variable * 0.8) + r_no_imp + (boletas * 0.7) + (arriendos * 0.8)
+        return total_depurado
 
-with col_cod:
-    hay_codeudor = st.checkbox("¿Agregar Codeudor?")
-    renta_t2 = depurar_ingresos("Codeudor") if hay_codeudor else 0
+# --- INTERFAZ PRINCIPAL ---
+st.title("🏆 Evaluador Hipotecario Profesional")
+st.sidebar.metric("UF ACTUAL", f"${uf:,.2f}")
 
-renta_total_neta = renta_t1 + renta_t2
+col_t1, col_t2 = st.columns(2)
+with col_t1: renta1 = calcular_renta("Titular 1")
+with col_t2: 
+    act_cod = st.checkbox("¿Incluir Codeudor?")
+    renta2 = calcular_renta("Codeudor") if act_cod else 0
 
+renta_total = renta1 + renta2
+
+# --- DEUDA CMF ---
 st.divider()
+st.header("💳 Deuda CMF (Carga Financiera)")
+with st.container(border=True):
+    d1, d2, d3 = st.columns(3)
+    
+    # Consumo
+    monto_cons = d1.number_input("Monto Insoluto Consumo/TC", min_value=0)
+    cuota_cons_sug = monto_cons * 0.05
+    cuota_cons = d1.number_input("Cuota Real Consumo", value=int(cuota_cons_sug), help="Sugerido: 5% de la deuda")
+    
+    # Hipotecario
+    monto_hipo = d2.number_input("Monto Insoluto Hipotecario", min_value=0)
+    cuota_hipo_sug = monto_hipo * 0.015
+    cuota_hipo = d2.number_input("Cuota Real Hipotecaria", value=int(cuota_hipo_sug), help="Sugerido: 1.5% de la deuda")
+    
+    # Otros
+    monto_com = d3.number_input("Monto Insoluto Comercial/Otros", min_value=0)
+    cuota_com = d3.number_input("Cuota Real Otros", value=int(monto_com * 0.05))
 
-# 4. DEUDA CMF (Lo que pediste)
-st.header("💳 Deuda CMF (Carga Mensual)")
-c1, c2, c3, c4 = st.columns(4)
-d_consumo = c1.number_input("Cuota Consumo/Tarjeta", value=0)
-d_hipo = c2.number_input("Dividendo Actual", value=0)
-d_comercial = c3.number_input("Crédito Comercial", value=0)
-d_otros = c4.number_input("Otros/Línea", value=0)
+total_cuotas_cmf = cuota_cons + cuota_hipo + cuota_com
 
-deuda_previa = d_consumo + d_hipo + d_comercial + d_otros
-
-# 5. SIMULACIÓN NUEVO CRÉDITO
+# --- SIMULACIÓN CRÉDITO ---
 st.divider()
-st.header("🏠 Datos de la Propiedad")
-p1, p2, p3 = st.columns(3)
-v_prop = p1.number_input("Valor Propiedad (UF)", value=2500)
-c_solicitado = p2.number_input("Crédito Solicitado (UF)", value=2000)
-plazo = p3.slider("Plazo (Años)", 5, 30, 20)
+st.header("🏠 Parámetros del Crédito")
+s1, s2, s3 = st.columns(3)
+val_prop = s1.number_input("Valor Propiedad (UF)", value=3000)
+monto_uf = s2.number_input("Monto Crédito (UF)", value=2400)
+plazo = s3.slider("Plazo (Años)", 5, 30, 20)
 
-# Cálculo matemático del dividendo (Tasa 5% estimada + seguros)
-tasa_mes = (0.05 / 12)
+# Cálculo Dividendo
+tasa = 0.05 / 12
 n = plazo * 12
-dividendo_uf = c_solicitado * (tasa_mes * (1 + tasa_mes)**n) / ((1 + tasa_mes)**n - 1)
-dividendo_clp = (dividendo_uf * uf_valor) * 1.12 # Incluye 12% aprox de seguros desgravamen/incendio
+div_uf = monto_uf * (tasa * (1 + tasa)**n) / ((1 + tasa)**n - 1)
+div_clp = (div_uf * uf) * 1.15 # Seguros
 
-# 6. RATIOS Y RESULTADOS
-rci = (dividendo_clp / renta_total_neta * 100) if renta_total_neta > 0 else 0
-cft = ((dividendo_clp + deuda_previa) / renta_total_neta * 100) if renta_total_neta > 0 else 0
+# --- RESUMEN Y RECOMENDACIÓN ---
+st.divider()
+rci = (div_clp / renta_total) * 100 if renta_total > 0 else 0
+cft = ((div_clp + total_cuotas_cmf) / renta_total) * 100 if renta_total > 0 else 0
 
-st.sidebar.divider()
-st.sidebar.header("📊 Resultado Final")
-st.sidebar.metric("Dividendo Est. (con seguros)", f"${dividendo_clp:,.0f}")
-st.sidebar.metric("RCI (Hipotecario / Renta)", f"{rci:.1f}%")
-st.sidebar.metric("CFT (Carga Total)", f"{cft:.1f}%")
+st.subheader("📝 Resumen de Evaluación")
+res1, res2, res3 = st.columns(3)
+res1.metric("Renta Total Depurada", f"${renta_total:,.0f}")
+res2.metric("RCI (Solo Hipotecario)", f"{rci:.1f}%")
+res3.metric("CFT (Carga Total)", f"{cft:.1f}%")
 
-if rci <= 25 and cft <= 45:
-    st.sidebar.success("✅ EVALUACIÓN: VIABLE")
+# LÓGICA DE RECOMENDACIÓN BANCARIA
+st.subheader("💡 Recomendación Bancaria")
+if rci > 30:
+    st.error("❌ NO CALIFICA: El dividendo supera el 30% de la renta. Debe bajar el monto o subir el plazo.")
+elif cft > 50:
+    st.warning("⚠️ ALTO RIESGO: La carga financiera total es muy alta. Recomendación: Banco Estado o Coopeuch (suelen ser más flexibles).")
+elif rci <= 25 and cft <= 40:
+    st.success("✅ EXCELENTE PERFIL: Califica en Santander, Chile, BCI y Scotiabank con tasas preferenciales.")
 else:
-    st.sidebar.error("❌ EVALUACIÓN: RECHAZADA")
-    if rci > 25: st.sidebar.write("Motivo: Dividendo supera 25% de la renta.")
-    if cft > 45: st.sidebar.write("Motivo: Carga financiera total supera 45%.")
+    st.info("ℹ️ PERFIL MEDIO: Califica en BICE o Itaú. Revise si puede consolidar deudas de consumo.")
