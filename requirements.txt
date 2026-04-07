@@ -1,5 +1,5 @@
 streamlit
 requests
-PyPDF2
+pdfplumber
 pandas
 fpdf
