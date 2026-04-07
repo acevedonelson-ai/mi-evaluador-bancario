@@ -1,17 +1,40 @@
 import streamlit as st
 import requests
-import PyPDF2
 import pandas as pd
+from fpdf import FPDF
+import sqlite3
+from datetime import datetime
 
-# --- CONFIGURACIÓN ESTÉTICA ---
-st.set_page_config(page_title="Broker Digital Pro", layout="wide")
+# --- CONFIGURACIÓN E INTERFAZ ---
+st.set_page_config(page_title="Sistema de Análisis Hipotecario", layout="wide")
+
+# CSS para mejorar la estética y la visibilidad de la UF
 st.markdown("""
     <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .uf-card {
+        background-color: #1E3A8A;
+        color: white;
+        padding: 20px;
+        border-radius: 10px;
+        text-align: center;
+        margin-bottom: 20px;
+    }
+    .main { background-color: #F3F4F6; }
     </style>
     """, unsafe_allow_html=True)
 
+# --- BASE DE DATOS (SQLite) ---
+def init_db():
+    conn = sqlite3.connect('evaluaciones.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS evaluaciones 
+                 (id INTEGER PRIMARY KEY, fecha TEXT, nombre TEXT, rut TEXT, renta REAL, rci REAL, cft REAL)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- FUNCIONES CORE ---
 @st.cache_data(ttl=3600)
 def get_uf():
     try:
@@ -20,104 +43,130 @@ def get_uf():
 
 uf = get_uf()
 
-# --- LÓGICA DE CÁLCULO DE RENTA ---
-def calcular_renta(key):
+def generar_pdf(datos):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, "Informe de Evaluación Hipotecaria", ln=True, align='C')
+    pdf.ln(10)
+    pdf.set_font("Arial", size=12)
+    for k, v in datos.items():
+        pdf.cell(200, 10, f"{k}: {v}", ln=True)
+    return pdf.output(dest='S').encode('latin-1')
+
+# --- SIDEBAR (UF Y DATOS PERSONALES) ---
+with st.sidebar:
+    st.markdown(f'<div class="uf-card"><h3>UF HOY</h3><h2>${uf:,.2f}</h2></div>', unsafe_allow_html=True)
+    st.header("👤 Datos del Cliente")
+    nombre = st.text_input("Nombre Completo")
+    rut = st.text_input("RUT")
+    email = st.text_input("Email")
+
+# --- CUERPO PRINCIPAL ---
+st.title("🛡️ Sistema de Análisis de Riesgo Hipotecario")
+
+def calcular_renta(label):
     with st.container(border=True):
-        st.subheader(f"📊 Ingresos {key}")
-        tipo = st.selectbox(f"Perfil Principal", ["Dependiente", "Independiente"], key=f"tipo_{key}")
+        st.subheader(f"💼 Ingresos {label}")
+        tipo = st.selectbox("Tipo de Perfil", ["Dependiente", "Independiente"], key=f"t_{label}")
         
-        r_fija = 0
-        r_variable = 0
-        r_no_imp = 0
+        col1, col2 = st.columns(2)
+        with col1:
+            fijo = st.number_input("Renta Fija / Base DAI", min_value=0, key=f"f_{label}")
+            variable = st.number_input("Promedio Variables (Bonos)", min_value=0, key=f"v_{label}")
+            no_imp = st.number_input("No Imponibles", min_value=0, key=f"n_{label}")
+        with col2:
+            boletas = st.number_input("Promedio Boletas (6m)", min_value=0, key=f"b_{label}")
+            arriendos = st.number_input("Renta Arriendos", min_value=0, key=f"a_{label}")
+            if tipo == "Independiente":
+                st.file_uploader("Cargar DAI (PDF)", type="pdf", key=f"pdf_{label}")
         
-        if tipo == "Dependiente":
-            c1, c2, c3 = st.columns(3)
-            r_fija = c1.number_input("Sueldo Base + Gratif.", min_value=0, key=f"f_{key}")
-            r_variable = c2.number_input("Promedio Variables (Bonos)", min_value=0, key=f"v_{key}")
-            r_no_imp = c3.number_input("Colación + Movil.", min_value=0, key=f"n_{key}")
-        else:
-            archivo = st.file_uploader("Cargar DAI (PDF)", type="pdf", key=f"pdf_{key}")
-            if archivo:
-                st.success("PDF cargado. Extrayendo datos...")
-                # Aquí iría la lógica de extracción específica
-            r_fija = st.number_input("Promedio Renta Líquida DAI", min_value=0, key=f"dai_{key}")
-            r_fija = r_fija * 0.7 # Castigo independiente
+        # Depuración
+        total = fijo + (variable * 0.8) + no_imp + (boletas * 0.7) + (arriendos * 0.8)
+        return total
 
-        # EXTRAS (Boletas y Arriendos)
-        with st.expander("➕ Sumar Boletas o Arriendos"):
-            col_a, col_b = st.columns(2)
-            boletas = col_a.number_input("Promedio Boletas (6 meses)", min_value=0, key=f"bol_{key}")
-            arriendos = col_b.number_input("Ingreso por Arriendos", min_value=0, key=f"arr_{key}")
-        
-        total_depurado = r_fija + (r_variable * 0.8) + r_no_imp + (boletas * 0.7) + (arriendos * 0.8)
-        return total_depurado
+c_t1, c_t2 = st.columns(2)
+with c_t1: r1 = calcular_renta("Titular")
+with c_t2: 
+    usa_cod = st.checkbox("¿Incluir Codeudor?")
+    r2 = calcular_renta("Codeudor") if usa_cod else 0
 
-# --- INTERFAZ PRINCIPAL ---
-st.title("🏆 Evaluador Hipotecario Profesional")
-st.sidebar.metric("UF ACTUAL", f"${uf:,.2f}")
-
-col_t1, col_t2 = st.columns(2)
-with col_t1: renta1 = calcular_renta("Titular 1")
-with col_t2: 
-    act_cod = st.checkbox("¿Incluir Codeudor?")
-    renta2 = calcular_renta("Codeudor") if act_cod else 0
-
-renta_total = renta1 + renta2
+renta_depurada = r1 + r2
 
 # --- DEUDA CMF ---
 st.divider()
-st.header("💳 Deuda CMF (Carga Financiera)")
-with st.container(border=True):
-    d1, d2, d3 = st.columns(3)
-    
-    # Consumo
-    monto_cons = d1.number_input("Monto Insoluto Consumo/TC", min_value=0)
-    cuota_cons_sug = monto_cons * 0.05
-    cuota_cons = d1.number_input("Cuota Real Consumo", value=int(cuota_cons_sug), help="Sugerido: 5% de la deuda")
-    
-    # Hipotecario
-    monto_hipo = d2.number_input("Monto Insoluto Hipotecario", min_value=0)
-    cuota_hipo_sug = monto_hipo * 0.015
-    cuota_hipo = d2.number_input("Cuota Real Hipotecaria", value=int(cuota_hipo_sug), help="Sugerido: 1.5% de la deuda")
-    
-    # Otros
-    monto_com = d3.number_input("Monto Insoluto Comercial/Otros", min_value=0)
-    cuota_com = d3.number_input("Cuota Real Otros", value=int(monto_com * 0.05))
+st.header("💳 Análisis de Deuda CMF")
+col_d1, col_d2 = st.columns(2)
+with col_d1:
+    monto_cons = st.number_input("Monto Insoluto Consumo/TC", value=0)
+    cuota_cons = st.number_input("Cuota Mensual Consumo (Real)", value=int(monto_cons * 0.05))
+with col_d2:
+    monto_hipo = st.number_input("Monto Insoluto Otros Hipotecarios", value=0)
+    cuota_hipo = st.number_input("Cuota Mensual Otros Hipot. (Real)", value=int(monto_hipo * 0.015))
 
-total_cuotas_cmf = cuota_cons + cuota_hipo + cuota_com
-
-# --- SIMULACIÓN CRÉDITO ---
+# --- SIMULACIÓN ---
 st.divider()
-st.header("🏠 Parámetros del Crédito")
+st.header("🏠 Simulación de Crédito")
 s1, s2, s3 = st.columns(3)
-val_prop = s1.number_input("Valor Propiedad (UF)", value=3000)
-monto_uf = s2.number_input("Monto Crédito (UF)", value=2400)
+v_prop = s1.number_input("Valor Propiedad (UF)", value=3000)
+m_cred = s2.number_input("Crédito Solicitado (UF)", value=2400)
 plazo = s3.slider("Plazo (Años)", 5, 30, 20)
 
-# Cálculo Dividendo
+# Cálculo Dividendo (Tasa 5% + Seguros)
 tasa = 0.05 / 12
 n = plazo * 12
-div_uf = monto_uf * (tasa * (1 + tasa)**n) / ((1 + tasa)**n - 1)
-div_clp = (div_uf * uf) * 1.15 # Seguros
+div_uf = m_cred * (tasa * (1 + tasa)**n) / ((1 + tasa)**n - 1)
+div_clp = (div_uf * uf) * 1.15
 
-# --- RESUMEN Y RECOMENDACIÓN ---
+# --- RESUMEN Y RECOMENDACIONES ---
 st.divider()
-rci = (div_clp / renta_total) * 100 if renta_total > 0 else 0
-cft = ((div_clp + total_cuotas_cmf) / renta_total) * 100 if renta_total > 0 else 0
+rci = (div_clp / renta_depurada * 100) if renta_depurada > 0 else 0
+cft = ((div_clp + cuota_cons + cuota_hipo) / renta_depurada * 100) if renta_depurada > 0 else 0
 
-st.subheader("📝 Resumen de Evaluación")
+st.header("📋 Resumen Ejecutivo")
 res1, res2, res3 = st.columns(3)
-res1.metric("Renta Total Depurada", f"${renta_total:,.0f}")
-res2.metric("RCI (Solo Hipotecario)", f"{rci:.1f}%")
-res3.metric("CFT (Carga Total)", f"{cft:.1f}%")
+res1.metric("Renta Depurada Total", f"${renta_depurada:,.0f}")
+res2.metric("RCI (Max 25-30%)", f"{rci:.1f}%")
+res3.metric("CFT (Max 45-50%)", f"{cft:.1f}%")
 
-# LÓGICA DE RECOMENDACIÓN BANCARIA
-st.subheader("💡 Recomendación Bancaria")
-if rci > 30:
-    st.error("❌ NO CALIFICA: El dividendo supera el 30% de la renta. Debe bajar el monto o subir el plazo.")
-elif cft > 50:
-    st.warning("⚠️ ALTO RIESGO: La carga financiera total es muy alta. Recomendación: Banco Estado o Coopeuch (suelen ser más flexibles).")
-elif rci <= 25 and cft <= 40:
-    st.success("✅ EXCELENTE PERFIL: Califica en Santander, Chile, BCI y Scotiabank con tasas preferenciales.")
+# Lógica de Recomendación
+recomendacion = ""
+bancos = ""
+if rci <= 25 and cft <= 45:
+    recomendacion = "SUJETO APROBADO"
+    bancos = "Santander, Chile, BCI, Scotiabank."
+    st.success(f"✅ {recomendacion}: Califica en {bancos}")
+elif cft <= 50:
+    recomendacion = "APROBACIÓN CON RESTRICCIÓN"
+    bancos = "Banco Estado, Coopeuch, Consorcio."
+    st.warning(f"⚠️ {recomendacion}: Califica en {bancos}")
 else:
-    st.info("ℹ️ PERFIL MEDIO: Califica en BICE o Itaú. Revise si puede consolidar deudas de consumo.")
+    recomendacion = "RECHAZADO"
+    bancos = "Ninguno (Sobreendeudamiento)"
+    st.error(f"❌ {recomendacion}: Excede carga financiera máxima.")
+
+# --- GUARDAR Y PDF ---
+if st.button("💾 Guardar Evaluación y Generar Reporte"):
+    # Guardar en BD
+    conn = sqlite3.connect('evaluaciones.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO evaluaciones (fecha, nombre, rut, renta, rci, cft) VALUES (?,?,?,?,?,?)",
+              (datetime.now().strftime("%Y-%m-%d"), nombre, rut, renta_depurada, rci, cft))
+    conn.commit()
+    conn.close()
+    
+    # PDF
+    datos_reporte = {
+        "Fecha": datetime.now().strftime("%d/%m/%Y"),
+        "Cliente": nombre,
+        "RUT": rut,
+        "Renta Depurada": f"${renta_depurada:,.0f}",
+        "RCI": f"{rci:.1f}%",
+        "CFT": f"{cft:.1f}%",
+        "Dividendo Est.": f"${div_clp:,.0f}",
+        "Resultado": recomendacion,
+        "Bancos Sugeridos": bancos
+    }
+    pdf_bytes = generar_pdf(datos_reporte)
+    st.download_button("📥 Descargar PDF de Evaluación", data=pdf_bytes, file_name=f"Evaluacion_{rut}.pdf", mime="application/pdf")
+    st.success("Evaluación guardada exitosamente en la base de datos.")
